@@ -150,64 +150,17 @@ func getPeerIDFromRequest(h httpEvent.Event) (string, error) {
 }
 
 func findValueByPeerID(db database.Database, peerID string) (string, []byte, error) {
-	key := peerID
+	key := "/peer/"+peerID
 	if data, err := db.Get(key); err == nil {
 		return key, data, nil
 	}
 
-	keys, err := db.List("/")
+	keys, err := db.List("/peer")
 	if err != nil {
 		return "", nil, err
 	}
 
-	for _, k := range keys {
-		data, err := db.Get(k)
-		if err != nil {
-			continue
-		}
-
-		var payload valuePayload
-		if err = json.Unmarshal(data, &payload); err != nil {
-			continue
-		}
-
-		if strings.TrimSpace(payload.PeerID) == strings.TrimSpace(peerID) && payload.PeerID != "" {
-			return k, data, nil
-		}
-	}
-
 	return "", nil, errValueNotFound
-}
-
-func cleanupLegacyEntries(db database.Database, peerID, keepKey string) error {
-	keys, err := db.List("/")
-	if err != nil {
-		return err
-	}
-
-	for _, k := range keys {
-		if k == keepKey {
-			continue
-		}
-
-		data, err := db.Get(k)
-		if err != nil {
-			continue
-		}
-
-		var payload valuePayload
-		if err = json.Unmarshal(data, &payload); err != nil {
-			continue
-		}
-
-		if strings.TrimSpace(payload.PeerID) == strings.TrimSpace(peerID) && payload.PeerID != "" {
-			if err = db.Delete(k); err != nil {
-				return err
-			}
-		}
-	}
-
-	return nil
 }
 
 // ---------- CRUD Handlers ----------
@@ -229,7 +182,7 @@ func listValues(e baseEvent.Event) uint32 {
 	}
 	defer db.Close()
 
-	keys, err := db.List("/")
+	keys, err := db.List("/peer")
 	if err != nil {
 		return handleHTTPError(h, fmt.Errorf("failed to list values"), 500)
 	}
@@ -299,13 +252,9 @@ func registerValue(e baseEvent.Event) uint32 {
 		return handleHTTPError(h, fmt.Errorf("failed to encode payload"), 500)
 	}
 
-	key := peerID
+	key := "/peer/"+peerID
 	if err = db.Put(key, payloadJSON); err != nil {
 		return handleHTTPError(h, fmt.Errorf("failed to store value"), 500)
-	}
-
-	if err = cleanupLegacyEntries(db, peerID, key); err != nil {
-		return handleHTTPError(h, fmt.Errorf("failed to cleanup legacy entries"), 500)
 	}
 
 	return sendJSONResponse(h, map[string]string{
