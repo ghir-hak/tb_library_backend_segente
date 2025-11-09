@@ -110,6 +110,40 @@ func getIDFromPath(h httpEvent.Event) (string, error) {
 	return id, nil
 }
 
+func getIDFromRequest(h httpEvent.Event) (string, error) {
+	id, err := getIDFromPath(h)
+	if err == nil && strings.TrimSpace(id) != "delete" {
+		return id, nil
+	}
+
+	if query, err := h.Query(); err == nil {
+		if queryID := strings.TrimSpace(query.Get("id")); queryID != "" {
+			return queryID, nil
+		}
+	}
+
+	body, err := io.ReadAll(h.Body())
+	if err != nil {
+		return "", fmt.Errorf("failed to read request body")
+	}
+	if len(body) == 0 {
+		return "", fmt.Errorf("missing value id")
+	}
+
+	var payload struct {
+		ID string `json:"id"`
+	}
+	if err = json.Unmarshal(body, &payload); err != nil {
+		return "", fmt.Errorf("invalid payload format")
+	}
+
+	if strings.TrimSpace(payload.ID) == "" {
+		return "", fmt.Errorf("missing value id")
+	}
+
+	return payload.ID, nil
+}
+
 // ---------- CRUD Handlers ----------
 
 //export listValues
@@ -218,7 +252,7 @@ func getValue(e baseEvent.Event) uint32 {
 		return 0
 	}
 
-	id, err := getIDFromPath(h)
+	id, err := getIDFromRequest(h)
 	if err != nil {
 		return handleHTTPError(h, err, 400)
 	}
