@@ -14,7 +14,7 @@ import (
 
 const (
 	dbName           = "seguente"
-	valueStorePrefix = "/values/"
+	valueStorePrefix = ""
 )
 
 type valueAddress struct {
