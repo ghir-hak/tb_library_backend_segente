@@ -44,7 +44,10 @@ func setCORSHeaders(h httpEvent.Event) {
 }
 
 func handleHTTPError(h httpEvent.Event, err error, code int) uint32 {
-	h.Write([]byte(err.Error()))
+	h.Headers().Set("Content-Type", "application/json")
+	response := map[string]string{"error": err.Error()}
+	jsonData, _ := json.Marshal(response)
+	h.Write(jsonData)
 	h.Return(code)
 	return 1
 }
@@ -58,6 +61,26 @@ func sendJSONResponse(h httpEvent.Event, data interface{}) uint32 {
 	h.Write(jsonData)
 	h.Return(200)
 	return 0
+}
+
+func handlePreflight(h httpEvent.Event, expectedMethod string) (proceed bool, code uint32) {
+	method, err := h.Method()
+	if err != nil {
+		return false, handleHTTPError(h, err, 400)
+	}
+
+	if method == "OPTIONS" {
+		h.Return(204)
+		return false, 0
+	}
+
+	if method != expectedMethod {
+		h.Write([]byte("Method not allowed"))
+		h.Return(405)
+		return false, 1
+	}
+
+	return true, 0
 }
 
 //export listValues
@@ -80,52 +103,29 @@ func listValues(e baseEvent.Event) uint32 {
 
 	keys, err := db.List(valueStorePrefix)
 	if err != nil {
-		h.Write([]byte("Failed to list server descriptors"))
-		h.Return(500)
-		return 1
+		return handleHTTPError(h, err, 500)
 	}
 
 	records := make([]storedServer, 0, len(keys))
 	for _, key := range keys {
-		fullKey := key
 		if !strings.HasPrefix(key, valueStorePrefix) {
-			fullKey = valueStorePrefix + key
+			key = valueStorePrefix + key
 		}
 
-		valueBytes, err := db.Get(fullKey)
+		valueBytes, err := db.Get(key)
 		if err != nil {
-			return handleHTTPError(h, err, 500)
+			continue
 		}
 
 		var record storedServer
 		if err = json.Unmarshal(valueBytes, &record); err != nil {
-			return handleHTTPError(h, err, 500)
+			continue
 		}
 
 		records = append(records, record)
 	}
 
 	return sendJSONResponse(h, records)
-}
-
-func handlePreflight(h httpEvent.Event, expectedMethod string) (proceed bool, code uint32) {
-	method, err := h.Method()
-	if err != nil {
-		return false, handleHTTPError(h, err, 400)
-	}
-
-	if method == "OPTIONS" {
-		h.Return(204)
-		return false, 0
-	}
-
-	if method != expectedMethod {
-		h.Write([]byte("Method not allowed"))
-		h.Return(405)
-		return false, 1
-	}
-
-	return true, 0
 }
 
 //export registerValue
@@ -151,9 +151,7 @@ func registerValue(e baseEvent.Event) uint32 {
 	}
 
 	if validationErr := validateServerDescriptor(payload); validationErr != nil {
-		h.Write([]byte(validationErr.Error()))
-		h.Return(400)
-		return 1
+		return handleHTTPError(h, validationErr, 400)
 	}
 
 	db, err := database.New("seguente")
@@ -193,9 +191,7 @@ func getValue(e baseEvent.Event) uint32 {
 
 	key, err := getPeerIDFromPath(h)
 	if err != nil {
-		h.Write([]byte(err.Error()))
-		h.Return(400)
-		return 1
+		return handleHTTPError(h, err, 400)
 	}
 
 	db, err := database.New("seguente")
@@ -206,9 +202,7 @@ func getValue(e baseEvent.Event) uint32 {
 
 	valueBytes, err := db.Get(valueStorePrefix + key)
 	if err != nil {
-		h.Write([]byte("Server descriptor not found"))
-		h.Return(404)
-		return 1
+		return handleHTTPError(h, errors.New("Server descriptor not found"), 404)
 	}
 
 	var record storedServer
@@ -233,9 +227,7 @@ func deleteValue(e baseEvent.Event) uint32 {
 
 	key, err := getPeerIDFromPath(h)
 	if err != nil {
-		h.Write([]byte(err.Error()))
-		h.Return(400)
-		return 1
+		return handleHTTPError(h, err, 400)
 	}
 
 	db, err := database.New("seguente")
@@ -246,18 +238,14 @@ func deleteValue(e baseEvent.Event) uint32 {
 
 	valueKey := valueStorePrefix + key
 	if _, err = db.Get(valueKey); err != nil {
-		h.Write([]byte("Server descriptor not found"))
-		h.Return(404)
-		return 1
+		return handleHTTPError(h, errors.New("Server descriptor not found"), 404)
 	}
 
 	if err = db.Delete(valueKey); err != nil {
 		return handleHTTPError(h, err, 500)
 	}
 
-	h.Write([]byte("Server descriptor deleted"))
-	h.Return(200)
-	return 0
+	return sendJSONResponse(h, map[string]string{"message": "Server descriptor deleted"})
 }
 
 func validateServerDescriptor(payload serverDescriptor) error {
@@ -274,16 +262,13 @@ func validateServerDescriptor(payload serverDescriptor) error {
 }
 
 func getPeerIDFromPath(h httpEvent.Event) (string, error) {
-	peerID, err := h.Path().Get("peerId")
-	if err == nil && peerID != "" {
-		return peerID, nil
-	}
-	key, keyErr := h.Path().Get("key")
-	if keyErr == nil && key != "" {
-		return key, nil
-	}
+	path, err := h.Path()
 	if err != nil {
 		return "", err
 	}
-	return "", keyErr
+	parts := strings.Split(strings.Trim(path, "/"), "/")
+	if len(parts) < 2 {
+		return "", errors.New("Missing peerId in path")
+	}
+	return parts[len(parts)-1], nil
 }
