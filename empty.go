@@ -116,9 +116,10 @@ func getIDFromRequest(h httpEvent.Event) (string, error) {
 		return id, nil
 	}
 
-	if query, err := h.Query(); err == nil {
-		if queryID := strings.TrimSpace(query.Get("id")); queryID != "" {
-			return queryID, nil
+	query := h.Query()
+	if queryID, err := query.Get("id"); err == nil {
+		if trimmed := strings.TrimSpace(queryID); trimmed != "" {
+			return trimmed, nil
 		}
 	}
 
