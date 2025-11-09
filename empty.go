@@ -150,15 +150,11 @@ func getPeerIDFromRequest(h httpEvent.Event) (string, error) {
 }
 
 func findValueByPeerID(db database.Database, peerID string) (string, []byte, error) {
-	key := "/peer/"+peerID
+	key := "/peer/" + peerID
 	if data, err := db.Get(key); err == nil {
 		return key, data, nil
 	}
 
-	keys, err := db.List("/peer")
-	if err != nil {
-		return "", nil, err
-	}
 
 	return "", nil, errValueNotFound
 }
@@ -252,7 +248,7 @@ func registerValue(e baseEvent.Event) uint32 {
 		return handleHTTPError(h, fmt.Errorf("failed to encode payload"), 500)
 	}
 
-	key := "/peer/"+peerID
+	key := "/peer/" + peerID
 	if err = db.Put(key, payloadJSON); err != nil {
 		return handleHTTPError(h, fmt.Errorf("failed to store value"), 500)
 	}
