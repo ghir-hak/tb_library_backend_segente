@@ -12,10 +12,7 @@ import (
 	httpEvent "github.com/taubyte/go-sdk/http/event"
 )
 
-const (
-	dbName           = "seguentedb"
-	valueStorePrefix = ""
-)
+const dbName = "seguente"
 
 var errValueNotFound = errors.New("value not found")
 
@@ -153,12 +150,12 @@ func getPeerIDFromRequest(h httpEvent.Event) (string, error) {
 }
 
 func findValueByPeerID(db database.Database, peerID string) (string, []byte, error) {
-	key := valueStorePrefix + peerID
+	key := peerID
 	if data, err := db.Get(key); err == nil {
 		return key, data, nil
 	}
 
-	keys, err := db.List(valueStorePrefix)
+	keys, err := db.List("")
 	if err != nil {
 		return "", nil, err
 	}
@@ -183,7 +180,7 @@ func findValueByPeerID(db database.Database, peerID string) (string, []byte, err
 }
 
 func cleanupLegacyEntries(db database.Database, peerID, keepKey string) error {
-	keys, err := db.List(valueStorePrefix)
+	keys, err := db.List("")
 	if err != nil {
 		return err
 	}
@@ -232,15 +229,15 @@ func listValues(e baseEvent.Event) uint32 {
 	}
 	defer db.Close()
 
-	keys, err := db.List(valueStorePrefix)
+	keys, err := db.List("")
 	if err != nil {
 		return handleHTTPError(h, fmt.Errorf("failed to list values"), 500)
 	}
 
 	values := make([]valuePayload, 0, len(keys))
 	for _, key := range keys {
-		id := strings.TrimPrefix(key, valueStorePrefix)
-		data, err := db.Get(key)
+		id := key
+		data, err := db.Get(id)
 		if err != nil {
 			return handleHTTPError(h, fmt.Errorf("failed to read value for key %s", id), 500)
 		}
@@ -302,7 +299,7 @@ func registerValue(e baseEvent.Event) uint32 {
 		return handleHTTPError(h, fmt.Errorf("failed to encode payload"), 500)
 	}
 
-	key := valueStorePrefix + peerID
+	key := peerID
 	if err = db.Put(key, payloadJSON); err != nil {
 		return handleHTTPError(h, fmt.Errorf("failed to store value"), 500)
 	}
