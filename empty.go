@@ -2,57 +2,36 @@ package lib
 
 import (
 	"encoding/json"
-	"errors"
+	"fmt"
 	"io"
 	"strings"
 	"time"
 
 	"github.com/taubyte/go-sdk/database"
-	baseEvent "github.com/taubyte/go-sdk/event"
-	httpEvent "github.com/taubyte/go-sdk/http/event"
+	"github.com/taubyte/go-sdk/event"
+	"github.com/taubyte/go-sdk/http/event"
 )
 
-const valueStorePrefix = "/values/"
+const (
+	dbName          = "seguente"
+	valueStorePrefix = "/values/"
+)
 
-type addressPayload struct {
-	IP       string  `json:"ip"`
-	Port     *string `json:"port,omitempty"`
-	Protocol *string `json:"protocol,omitempty"`
-}
+// ---------- Utility Functions ----------
 
-type limitsPayload struct {
-	Soft int `json:"soft"`
-	Hard int `json:"hard"`
-}
-
-type serverDescriptor struct {
-	PeerID  string         `json:"peerId"`
-	Address addressPayload `json:"address"`
-	Limits  limitsPayload  `json:"limits"`
-	Raw     string         `json:"raw"`
-}
-
-type storedServer struct {
-	serverDescriptor
-	UpdatedAt string `json:"updatedAt"`
-}
-
-func setCORSHeaders(h httpEvent.Event) {
+func setCORSHeaders(h event.Event) {
 	h.Headers().Set("Access-Control-Allow-Origin", "*")
-	h.Headers().Set("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
+	h.Headers().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
 	h.Headers().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
 }
 
-func handleHTTPError(h httpEvent.Event, err error, code int) uint32 {
-	h.Headers().Set("Content-Type", "application/json")
-	response := map[string]string{"error": err.Error()}
-	jsonData, _ := json.Marshal(response)
-	h.Write(jsonData)
+func handleHTTPError(h event.Event, err error, code int) uint32 {
+	h.Write([]byte(err.Error()))
 	h.Return(code)
 	return 1
 }
 
-func sendJSONResponse(h httpEvent.Event, data interface{}) uint32 {
+func sendJSONResponse(h event.Event, data interface{}) uint32 {
 	jsonData, err := json.Marshal(data)
 	if err != nil {
 		return handleHTTPError(h, err, 500)
@@ -63,212 +42,151 @@ func sendJSONResponse(h httpEvent.Event, data interface{}) uint32 {
 	return 0
 }
 
-func handlePreflight(h httpEvent.Event, expectedMethod string) (proceed bool, code uint32) {
-	method, err := h.Method()
-	if err != nil {
-		return false, handleHTTPError(h, err, 400)
-	}
-
-	if method == "OPTIONS" {
-		h.Return(204)
-		return false, 0
-	}
-
-	if method != expectedMethod {
-		h.Write([]byte("Method not allowed"))
-		h.Return(405)
-		return false, 1
-	}
-
-	return true, 0
+func openDB() (*database.Database, error) {
+	return database.New(dbName)
 }
 
+func isPreflight(h event.Event) bool {
+	if method, err := h.Method(); err == nil && method == "OPTIONS" {
+		h.Return(204)
+		return true
+	}
+	return false
+}
+
+// ---------- CRUD Handlers ----------
+
 //export listValues
-func listValues(e baseEvent.Event) uint32 {
+func listValues(e event.Event) uint32 {
 	h, err := e.HTTP()
 	if err != nil {
 		return 1
 	}
 	setCORSHeaders(h)
-
-	if proceed, code := handlePreflight(h, "GET"); !proceed {
-		return code
+	if isPreflight(h) {
+		return 0
 	}
 
-	db, err := database.New("seguente")
+	db, err := openDB()
 	if err != nil {
-		return handleHTTPError(h, err, 500)
+		return handleHTTPError(h, fmt.Errorf("failed to open database"), 500)
 	}
 	defer db.Close()
 
 	keys, err := db.List(valueStorePrefix)
 	if err != nil {
-		return handleHTTPError(h, err, 500)
+		return handleHTTPError(h, fmt.Errorf("failed to list values"), 500)
 	}
 
-	records := make([]storedServer, 0, len(keys))
-	for _, key := range keys {
-		if !strings.HasPrefix(key, valueStorePrefix) {
-			key = valueStorePrefix + key
-		}
-
-		valueBytes, err := db.Get(key)
-		if err != nil {
-			continue
-		}
-
-		var record storedServer
-		if err = json.Unmarshal(valueBytes, &record); err != nil {
-			continue
-		}
-
-		records = append(records, record)
+	for i := range keys {
+		keys[i] = strings.TrimPrefix(keys[i], valueStorePrefix)
 	}
 
-	return sendJSONResponse(h, records)
+	return sendJSONResponse(h, map[string]interface{}{
+		"count": len(keys),
+		"keys":  keys,
+	})
 }
 
 //export registerValue
-func registerValue(e baseEvent.Event) uint32 {
+func registerValue(e event.Event) uint32 {
 	h, err := e.HTTP()
 	if err != nil {
 		return 1
 	}
 	setCORSHeaders(h)
-
-	if proceed, code := handlePreflight(h, "POST"); !proceed {
-		return code
+	if isPreflight(h) {
+		return 0
 	}
 
 	body, err := io.ReadAll(h.Body())
 	if err != nil {
-		return handleHTTPError(h, err, 400)
+		return handleHTTPError(h, fmt.Errorf("failed to read request body"), 400)
 	}
 
-	var payload serverDescriptor
-	if err = json.Unmarshal(body, &payload); err != nil {
-		return handleHTTPError(h, err, 400)
-	}
-
-	if validationErr := validateServerDescriptor(payload); validationErr != nil {
-		return handleHTTPError(h, validationErr, 400)
-	}
-
-	db, err := database.New("seguente")
+	db, err := openDB()
 	if err != nil {
-		return handleHTTPError(h, err, 500)
+		return handleHTTPError(h, fmt.Errorf("failed to open database"), 500)
 	}
 	defer db.Close()
 
-	record := storedServer{
-		serverDescriptor: payload,
-		UpdatedAt:        time.Now().UTC().Format(time.RFC3339Nano),
+	id := fmt.Sprintf("%d", time.Now().UnixNano())
+	if err = db.Put(valueStorePrefix+id, body); err != nil {
+		return handleHTTPError(h, fmt.Errorf("failed to store value"), 500)
 	}
 
-	recordBytes, err := json.Marshal(record)
-	if err != nil {
-		return handleHTTPError(h, err, 500)
-	}
-
-	if err = db.Put(valueStorePrefix+payload.PeerID, recordBytes); err != nil {
-		return handleHTTPError(h, err, 500)
-	}
-
-	return sendJSONResponse(h, record)
+	return sendJSONResponse(h, map[string]string{
+		"id":     id,
+		"status": "created",
+	})
 }
 
 //export getValue
-func getValue(e baseEvent.Event) uint32 {
+func getValue(e event.Event) uint32 {
 	h, err := e.HTTP()
 	if err != nil {
 		return 1
 	}
 	setCORSHeaders(h)
-
-	if proceed, code := handlePreflight(h, "GET"); !proceed {
-		return code
+	if isPreflight(h) {
+		return 0
 	}
 
-	key, err := getPeerIDFromPath(h)
-	if err != nil {
-		return handleHTTPError(h, err, 400)
+	id, err := h.Path().Get("id")
+	if err != nil || id == "" {
+		return handleHTTPError(h, fmt.Errorf("missing value id"), 400)
 	}
 
-	db, err := database.New("seguente")
+	db, err := openDB()
 	if err != nil {
-		return handleHTTPError(h, err, 500)
+		return handleHTTPError(h, fmt.Errorf("failed to open database"), 500)
 	}
 	defer db.Close()
 
-	valueBytes, err := db.Get(valueStorePrefix + key)
+	data, err := db.Get(valueStorePrefix + id)
 	if err != nil {
-		return handleHTTPError(h, errors.New("Server descriptor not found"), 404)
+		return handleHTTPError(h, fmt.Errorf("value not found"), 404)
 	}
 
-	var record storedServer
-	if err = json.Unmarshal(valueBytes, &record); err != nil {
-		return handleHTTPError(h, err, 500)
-	}
-
-	return sendJSONResponse(h, record)
+	h.Headers().Set("Content-Type", "application/json")
+	h.Write(data)
+	h.Return(200)
+	return 0
 }
 
 //export deleteValue
-func deleteValue(e baseEvent.Event) uint32 {
+func deleteValue(e event.Event) uint32 {
 	h, err := e.HTTP()
 	if err != nil {
 		return 1
 	}
 	setCORSHeaders(h)
-
-	if proceed, code := handlePreflight(h, "DELETE"); !proceed {
-		return code
+	if isPreflight(h) {
+		return 0
 	}
 
-	key, err := getPeerIDFromPath(h)
-	if err != nil {
-		return handleHTTPError(h, err, 400)
+	id, err := h.Path().Get("id")
+	if err != nil || id == "" {
+		return handleHTTPError(h, fmt.Errorf("missing value id"), 400)
 	}
 
-	db, err := database.New("seguente")
+	db, err := openDB()
 	if err != nil {
-		return handleHTTPError(h, err, 500)
+		return handleHTTPError(h, fmt.Errorf("failed to open database"), 500)
 	}
 	defer db.Close()
 
-	valueKey := valueStorePrefix + key
-	if _, err = db.Get(valueKey); err != nil {
-		return handleHTTPError(h, errors.New("Server descriptor not found"), 404)
+	key := valueStorePrefix + id
+	if _, err = db.Get(key); err != nil {
+		return handleHTTPError(h, fmt.Errorf("value not found"), 404)
 	}
 
-	if err = db.Delete(valueKey); err != nil {
-		return handleHTTPError(h, err, 500)
+	if err = db.Delete(key); err != nil {
+		return handleHTTPError(h, fmt.Errorf("failed to delete value"), 500)
 	}
 
-	return sendJSONResponse(h, map[string]string{"message": "Server descriptor deleted"})
-}
-
-func validateServerDescriptor(payload serverDescriptor) error {
-	if payload.PeerID == "" {
-		return errors.New("Missing peerId field")
-	}
-	if payload.Address.IP == "" {
-		return errors.New("Missing address.ip field")
-	}
-	if payload.Limits.Soft == 0 && payload.Limits.Hard == 0 {
-		return errors.New("Missing limits field")
-	}
-	return nil
-}
-
-func getPeerIDFromPath(h httpEvent.Event) (string, error) {
-	path, err := h.Path()
-	if err != nil {
-		return "", err
-	}
-	parts := strings.Split(strings.Trim(path, "/"), "/")
-	if len(parts) < 2 {
-		return "", errors.New("Missing peerId in path")
-	}
-	return parts[len(parts)-1], nil
+	return sendJSONResponse(h, map[string]string{
+		"id":     id,
+		"status": "deleted",
+	})
 }
