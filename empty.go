@@ -155,7 +155,7 @@ func findValueByPeerID(db database.Database, peerID string) (string, []byte, err
 		return key, data, nil
 	}
 
-	keys, err := db.List("")
+	keys, err := db.List("/")
 	if err != nil {
 		return "", nil, err
 	}
@@ -180,7 +180,7 @@ func findValueByPeerID(db database.Database, peerID string) (string, []byte, err
 }
 
 func cleanupLegacyEntries(db database.Database, peerID, keepKey string) error {
-	keys, err := db.List("")
+	keys, err := db.List("/")
 	if err != nil {
 		return err
 	}
@@ -229,7 +229,7 @@ func listValues(e baseEvent.Event) uint32 {
 	}
 	defer db.Close()
 
-	keys, err := db.List("")
+	keys, err := db.List("/")
 	if err != nil {
 		return handleHTTPError(h, fmt.Errorf("failed to list values"), 500)
 	}
