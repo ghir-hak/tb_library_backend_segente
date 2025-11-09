@@ -17,6 +17,29 @@ const (
 	valueStorePrefix = "/values/"
 )
 
+type valueAddress struct {
+	IP       string  `json:"ip"`
+	Port     *string `json:"port"`
+	Protocol *string `json:"protocol"`
+}
+
+type valueLimits struct {
+	Soft float64 `json:"soft"`
+	Hard float64 `json:"hard"`
+}
+
+type valuePayload struct {
+	PeerID  string       `json:"peerId"`
+	Address valueAddress `json:"address"`
+	Limits  valueLimits  `json:"limits"`
+	Raw     string       `json:"raw"`
+}
+
+type valueRecord struct {
+	ID string `json:"id"`
+	valuePayload
+}
+
 // ---------- Utility Functions ----------
 
 func setCORSHeaders(h httpEvent.Event) {
@@ -44,6 +67,19 @@ func sendJSONResponse(h httpEvent.Event, data interface{}) uint32 {
 
 func openDB() (database.Database, error) {
 	return database.New(dbName)
+}
+
+func validateValuePayload(v valuePayload) error {
+	if strings.TrimSpace(v.PeerID) == "" {
+		return fmt.Errorf("peerId is required")
+	}
+	if strings.TrimSpace(v.Address.IP) == "" {
+		return fmt.Errorf("address.ip is required")
+	}
+	if strings.TrimSpace(v.Raw) == "" {
+		return fmt.Errorf("raw is required")
+	}
+	return nil
 }
 
 func isPreflight(h httpEvent.Event) bool {
@@ -98,13 +134,28 @@ func listValues(e baseEvent.Event) uint32 {
 		return handleHTTPError(h, fmt.Errorf("failed to list values"), 500)
 	}
 
-	for i := range keys {
-		keys[i] = strings.TrimPrefix(keys[i], valueStorePrefix)
+	values := make([]valueRecord, 0, len(keys))
+	for _, key := range keys {
+		id := strings.TrimPrefix(key, valueStorePrefix)
+		data, err := db.Get(key)
+		if err != nil {
+			return handleHTTPError(h, fmt.Errorf("failed to read value with id %s", id), 500)
+		}
+
+		var payload valuePayload
+		if err = json.Unmarshal(data, &payload); err != nil {
+			return handleHTTPError(h, fmt.Errorf("stored value for id %s is invalid", id), 500)
+		}
+
+		values = append(values, valueRecord{
+			ID:           id,
+			valuePayload: payload,
+		})
 	}
 
 	return sendJSONResponse(h, map[string]interface{}{
-		"count": len(keys),
-		"keys":  keys,
+		"count":  len(values),
+		"values": values,
 	})
 }
 
@@ -124,6 +175,15 @@ func registerValue(e baseEvent.Event) uint32 {
 		return handleHTTPError(h, fmt.Errorf("failed to read request body"), 400)
 	}
 
+	var payload valuePayload
+	if err = json.Unmarshal(body, &payload); err != nil {
+		return handleHTTPError(h, fmt.Errorf("invalid payload format"), 400)
+	}
+
+	if err = validateValuePayload(payload); err != nil {
+		return handleHTTPError(h, err, 400)
+	}
+
 	db, err := openDB()
 	if err != nil {
 		return handleHTTPError(h, fmt.Errorf("failed to open database"), 500)
@@ -131,7 +191,13 @@ func registerValue(e baseEvent.Event) uint32 {
 	defer db.Close()
 
 	id := fmt.Sprintf("%d", time.Now().UnixNano())
-	if err = db.Put(valueStorePrefix+id, body); err != nil {
+
+	payloadJSON, err := json.Marshal(payload)
+	if err != nil {
+		return handleHTTPError(h, fmt.Errorf("failed to encode payload"), 500)
+	}
+
+	if err = db.Put(valueStorePrefix+id, payloadJSON); err != nil {
 		return handleHTTPError(h, fmt.Errorf("failed to store value"), 500)
 	}
 
