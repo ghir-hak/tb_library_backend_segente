@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"strings"
 	"time"
 
 	"github.com/taubyte/go-sdk/database"
@@ -57,6 +58,54 @@ func sendJSONResponse(h httpEvent.Event, data interface{}) uint32 {
 	h.Write(jsonData)
 	h.Return(200)
 	return 0
+}
+
+//export listValues
+func listValues(e baseEvent.Event) uint32 {
+	h, err := e.HTTP()
+	if err != nil {
+		return 1
+	}
+	setCORSHeaders(h)
+
+	if proceed, code := handlePreflight(h, "GET"); !proceed {
+		return code
+	}
+
+	db, err := database.New("seguente")
+	if err != nil {
+		return handleHTTPError(h, err, 500)
+	}
+	defer db.Close()
+
+	keys, err := db.List(valueStorePrefix)
+	if err != nil {
+		h.Write([]byte("Failed to list server descriptors"))
+		h.Return(500)
+		return 1
+	}
+
+	records := make([]storedServer, 0, len(keys))
+	for _, key := range keys {
+		fullKey := key
+		if !strings.HasPrefix(key, valueStorePrefix) {
+			fullKey = valueStorePrefix + key
+		}
+
+		valueBytes, err := db.Get(fullKey)
+		if err != nil {
+			return handleHTTPError(h, err, 500)
+		}
+
+		var record storedServer
+		if err = json.Unmarshal(valueBytes, &record); err != nil {
+			return handleHTTPError(h, err, 500)
+		}
+
+		records = append(records, record)
+	}
+
+	return sendJSONResponse(h, records)
 }
 
 func handlePreflight(h httpEvent.Event, expectedMethod string) (proceed bool, code uint32) {
@@ -238,4 +287,3 @@ func getPeerIDFromPath(h httpEvent.Event) (string, error) {
 	}
 	return "", keyErr
 }
-
