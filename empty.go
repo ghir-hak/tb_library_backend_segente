@@ -8,30 +8,30 @@ import (
 	"time"
 
 	"github.com/taubyte/go-sdk/database"
-	"github.com/taubyte/go-sdk/event"
-	"github.com/taubyte/go-sdk/http/event"
+	baseEvent "github.com/taubyte/go-sdk/event"
+	httpEvent "github.com/taubyte/go-sdk/http/event"
 )
 
 const (
-	dbName          = "seguente"
+	dbName           = "seguente"
 	valueStorePrefix = "/values/"
 )
 
 // ---------- Utility Functions ----------
 
-func setCORSHeaders(h event.Event) {
+func setCORSHeaders(h httpEvent.Event) {
 	h.Headers().Set("Access-Control-Allow-Origin", "*")
 	h.Headers().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
 	h.Headers().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
 }
 
-func handleHTTPError(h event.Event, err error, code int) uint32 {
+func handleHTTPError(h httpEvent.Event, err error, code int) uint32 {
 	h.Write([]byte(err.Error()))
 	h.Return(code)
 	return 1
 }
 
-func sendJSONResponse(h event.Event, data interface{}) uint32 {
+func sendJSONResponse(h httpEvent.Event, data interface{}) uint32 {
 	jsonData, err := json.Marshal(data)
 	if err != nil {
 		return handleHTTPError(h, err, 500)
@@ -46,7 +46,7 @@ func openDB() (*database.Database, error) {
 	return database.New(dbName)
 }
 
-func isPreflight(h event.Event) bool {
+func isPreflight(h httpEvent.Event) bool {
 	if method, err := h.Method(); err == nil && method == "OPTIONS" {
 		h.Return(204)
 		return true
@@ -57,7 +57,7 @@ func isPreflight(h event.Event) bool {
 // ---------- CRUD Handlers ----------
 
 //export listValues
-func listValues(e event.Event) uint32 {
+func listValues(e baseEvent.Event) uint32 {
 	h, err := e.HTTP()
 	if err != nil {
 		return 1
@@ -89,7 +89,7 @@ func listValues(e event.Event) uint32 {
 }
 
 //export registerValue
-func registerValue(e event.Event) uint32 {
+func registerValue(e baseEvent.Event) uint32 {
 	h, err := e.HTTP()
 	if err != nil {
 		return 1
@@ -122,7 +122,7 @@ func registerValue(e event.Event) uint32 {
 }
 
 //export getValue
-func getValue(e event.Event) uint32 {
+func getValue(e baseEvent.Event) uint32 {
 	h, err := e.HTTP()
 	if err != nil {
 		return 1
@@ -155,7 +155,7 @@ func getValue(e event.Event) uint32 {
 }
 
 //export deleteValue
-func deleteValue(e event.Event) uint32 {
+func deleteValue(e baseEvent.Event) uint32 {
 	h, err := e.HTTP()
 	if err != nil {
 		return 1
