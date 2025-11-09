@@ -2,10 +2,10 @@ package lib
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
-	"time"
 
 	"github.com/taubyte/go-sdk/database"
 	baseEvent "github.com/taubyte/go-sdk/event"
@@ -16,6 +16,8 @@ const (
 	dbName           = "seguente"
 	valueStorePrefix = ""
 )
+
+var errValueNotFound = errors.New("value not found")
 
 type valueAddress struct {
 	IP       string  `json:"ip"`
@@ -33,11 +35,6 @@ type valuePayload struct {
 	Address valueAddress `json:"address"`
 	Limits  valueLimits  `json:"limits"`
 	Raw     string       `json:"raw"`
-}
-
-type valueRecord struct {
-	ID string `json:"id"`
-	valuePayload
 }
 
 // ---------- Utility Functions ----------
@@ -90,7 +87,7 @@ func isPreflight(h httpEvent.Event) bool {
 	return false
 }
 
-func getIDFromPath(h httpEvent.Event) (string, error) {
+func getPeerIDFromPath(h httpEvent.Event) (string, error) {
 	path, err := h.Path()
 	if err != nil {
 		return "", fmt.Errorf("failed to read path")
@@ -98,25 +95,30 @@ func getIDFromPath(h httpEvent.Event) (string, error) {
 
 	trimmed := strings.Trim(path, "/")
 	if trimmed == "" {
-		return "", fmt.Errorf("missing value id")
+		return "", fmt.Errorf("missing peerId")
 	}
 
 	segments := strings.Split(trimmed, "/")
 	id := segments[len(segments)-1]
 	if id == "" {
-		return "", fmt.Errorf("missing value id")
+		return "", fmt.Errorf("missing peerId")
 	}
 
 	return id, nil
 }
 
-func getIDFromRequest(h httpEvent.Event) (string, error) {
-	id, err := getIDFromPath(h)
+func getPeerIDFromRequest(h httpEvent.Event) (string, error) {
+	id, err := getPeerIDFromPath(h)
 	if err == nil && strings.TrimSpace(id) != "delete" {
 		return id, nil
 	}
 
 	query := h.Query()
+	if queryPeerID, err := query.Get("peerId"); err == nil {
+		if trimmed := strings.TrimSpace(queryPeerID); trimmed != "" {
+			return trimmed, nil
+		}
+	}
 	if queryID, err := query.Get("id"); err == nil {
 		if trimmed := strings.TrimSpace(queryID); trimmed != "" {
 			return trimmed, nil
@@ -128,21 +130,87 @@ func getIDFromRequest(h httpEvent.Event) (string, error) {
 		return "", fmt.Errorf("failed to read request body")
 	}
 	if len(body) == 0 {
-		return "", fmt.Errorf("missing value id")
+		return "", fmt.Errorf("missing peerId")
 	}
 
 	var payload struct {
-		ID string `json:"id"`
+		ID     string `json:"id"`
+		PeerID string `json:"peerId"`
 	}
 	if err = json.Unmarshal(body, &payload); err != nil {
 		return "", fmt.Errorf("invalid payload format")
 	}
 
-	if strings.TrimSpace(payload.ID) == "" {
-		return "", fmt.Errorf("missing value id")
+	if trimmed := strings.TrimSpace(payload.PeerID); trimmed != "" {
+		return trimmed, nil
 	}
 
-	return payload.ID, nil
+	if trimmed := strings.TrimSpace(payload.ID); trimmed != "" {
+		return trimmed, nil
+	}
+
+	return "", fmt.Errorf("missing peerId")
+}
+
+func findValueByPeerID(db database.Database, peerID string) (string, []byte, error) {
+	key := valueStorePrefix + peerID
+	if data, err := db.Get(key); err == nil {
+		return key, data, nil
+	}
+
+	keys, err := db.List(valueStorePrefix)
+	if err != nil {
+		return "", nil, err
+	}
+
+	for _, k := range keys {
+		data, err := db.Get(k)
+		if err != nil {
+			continue
+		}
+
+		var payload valuePayload
+		if err = json.Unmarshal(data, &payload); err != nil {
+			continue
+		}
+
+		if strings.TrimSpace(payload.PeerID) == strings.TrimSpace(peerID) && payload.PeerID != "" {
+			return k, data, nil
+		}
+	}
+
+	return "", nil, errValueNotFound
+}
+
+func cleanupLegacyEntries(db database.Database, peerID, keepKey string) error {
+	keys, err := db.List(valueStorePrefix)
+	if err != nil {
+		return err
+	}
+
+	for _, k := range keys {
+		if k == keepKey {
+			continue
+		}
+
+		data, err := db.Get(k)
+		if err != nil {
+			continue
+		}
+
+		var payload valuePayload
+		if err = json.Unmarshal(data, &payload); err != nil {
+			continue
+		}
+
+		if strings.TrimSpace(payload.PeerID) == strings.TrimSpace(peerID) && payload.PeerID != "" {
+			if err = db.Delete(k); err != nil {
+				return err
+			}
+		}
+	}
+
+	return nil
 }
 
 // ---------- CRUD Handlers ----------
@@ -169,23 +237,24 @@ func listValues(e baseEvent.Event) uint32 {
 		return handleHTTPError(h, fmt.Errorf("failed to list values"), 500)
 	}
 
-	values := make([]valueRecord, 0, len(keys))
+	values := make([]valuePayload, 0, len(keys))
 	for _, key := range keys {
 		id := strings.TrimPrefix(key, valueStorePrefix)
 		data, err := db.Get(key)
 		if err != nil {
-			return handleHTTPError(h, fmt.Errorf("failed to read value with id %s", id), 500)
+			return handleHTTPError(h, fmt.Errorf("failed to read value for key %s", id), 500)
 		}
 
 		var payload valuePayload
 		if err = json.Unmarshal(data, &payload); err != nil {
-			return handleHTTPError(h, fmt.Errorf("stored value for id %s is invalid", id), 500)
+			return handleHTTPError(h, fmt.Errorf("stored value for key %s is invalid", id), 500)
 		}
 
-		values = append(values, valueRecord{
-			ID:           id,
-			valuePayload: payload,
-		})
+		if strings.TrimSpace(payload.PeerID) == "" {
+			payload.PeerID = id
+		}
+
+		values = append(values, payload)
 	}
 
 	return sendJSONResponse(h, map[string]interface{}{
@@ -225,19 +294,25 @@ func registerValue(e baseEvent.Event) uint32 {
 	}
 	defer db.Close()
 
-	id := fmt.Sprintf("%d", time.Now().UnixNano())
+	peerID := strings.TrimSpace(payload.PeerID)
+	payload.PeerID = peerID
 
 	payloadJSON, err := json.Marshal(payload)
 	if err != nil {
 		return handleHTTPError(h, fmt.Errorf("failed to encode payload"), 500)
 	}
 
-	if err = db.Put(valueStorePrefix+id, payloadJSON); err != nil {
+	key := valueStorePrefix + peerID
+	if err = db.Put(key, payloadJSON); err != nil {
 		return handleHTTPError(h, fmt.Errorf("failed to store value"), 500)
 	}
 
+	if err = cleanupLegacyEntries(db, peerID, key); err != nil {
+		return handleHTTPError(h, fmt.Errorf("failed to cleanup legacy entries"), 500)
+	}
+
 	return sendJSONResponse(h, map[string]string{
-		"id":     id,
+		"peerId": peerID,
 		"status": "created",
 	})
 }
@@ -253,7 +328,7 @@ func getValue(e baseEvent.Event) uint32 {
 		return 0
 	}
 
-	id, err := getIDFromRequest(h)
+	peerID, err := getPeerIDFromRequest(h)
 	if err != nil {
 		return handleHTTPError(h, err, 400)
 	}
@@ -264,9 +339,12 @@ func getValue(e baseEvent.Event) uint32 {
 	}
 	defer db.Close()
 
-	data, err := db.Get(valueStorePrefix + id)
+	_, data, err := findValueByPeerID(db, peerID)
 	if err != nil {
-		return handleHTTPError(h, fmt.Errorf("value not found"), 404)
+		if errors.Is(err, errValueNotFound) {
+			return handleHTTPError(h, err, 404)
+		}
+		return handleHTTPError(h, fmt.Errorf("failed to read value"), 500)
 	}
 
 	h.Headers().Set("Content-Type", "application/json")
@@ -286,7 +364,7 @@ func deleteValue(e baseEvent.Event) uint32 {
 		return 0
 	}
 
-	id, err := getIDFromPath(h)
+	peerID, err := getPeerIDFromRequest(h)
 	if err != nil {
 		return handleHTTPError(h, err, 400)
 	}
@@ -297,9 +375,12 @@ func deleteValue(e baseEvent.Event) uint32 {
 	}
 	defer db.Close()
 
-	key := valueStorePrefix + id
-	if _, err = db.Get(key); err != nil {
-		return handleHTTPError(h, fmt.Errorf("value not found"), 404)
+	key, _, err := findValueByPeerID(db, peerID)
+	if err != nil {
+		if errors.Is(err, errValueNotFound) {
+			return handleHTTPError(h, err, 404)
+		}
+		return handleHTTPError(h, fmt.Errorf("failed to read value"), 500)
 	}
 
 	if err = db.Delete(key); err != nil {
@@ -307,7 +388,7 @@ func deleteValue(e baseEvent.Event) uint32 {
 	}
 
 	return sendJSONResponse(h, map[string]string{
-		"id":     id,
+		"peerId": peerID,
 		"status": "deleted",
 	})
 }
