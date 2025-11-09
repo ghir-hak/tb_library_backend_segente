@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"strings"
 
 	"github.com/taubyte/go-sdk/database"
@@ -12,7 +13,12 @@ import (
 	httpEvent "github.com/taubyte/go-sdk/http/event"
 )
 
-const dbName = "seguentedb"
+const (
+	dbName    = "seguentedb"
+	metricKey = "metric"
+	metricMin = 0.0
+	metricMax = 100.0
+)
 
 var errValueNotFound = errors.New("value not found")
 
@@ -22,16 +28,22 @@ type valueAddress struct {
 	Protocol *string `json:"protocol"`
 }
 
-type valueLimits struct {
-	Soft float64 `json:"soft"`
-	Hard float64 `json:"hard"`
+type valuePayload struct {
+	PeerID  string                  `json:"peerId"`
+	Address valueAddress            `json:"address"`
+	Values  map[string]valueMetrics `json:"values"`
+	Raw     string                  `json:"raw"`
 }
 
-type valuePayload struct {
-	PeerID  string       `json:"peerId"`
-	Address valueAddress `json:"address"`
-	Limits  valueLimits  `json:"limits"`
-	Raw     string       `json:"raw"`
+type valueMetrics struct {
+	Current   float64 `json:"current"`
+	SoftLimit float64 `json:"softLimit"`
+	HardLimit float64 `json:"hardLimit"`
+}
+
+type legacyValueLimits struct {
+	Soft float64 `json:"soft"`
+	Hard float64 `json:"hard"`
 }
 
 // ---------- Utility Functions ----------
@@ -73,7 +85,147 @@ func validateValuePayload(v valuePayload) error {
 	if strings.TrimSpace(v.Raw) == "" {
 		return fmt.Errorf("raw is required")
 	}
+	if len(v.Values) == 0 {
+		return fmt.Errorf("values.%s is required", metricKey)
+	}
+
+	metric, ok := v.Values[metricKey]
+	if !ok {
+		return fmt.Errorf("values.%s is required", metricKey)
+	}
+
+	if !isFinite(metric.Current) || !isFinite(metric.SoftLimit) || !isFinite(metric.HardLimit) {
+		return fmt.Errorf("values.%s contains invalid numbers", metricKey)
+	}
+	if metric.SoftLimit < metricMin || metric.SoftLimit > metricMax {
+		return fmt.Errorf("values.%s.softLimit must be between %.0f and %.0f", metricKey, metricMin, metricMax)
+	}
+	if metric.HardLimit < metricMin || metric.HardLimit > metricMax {
+		return fmt.Errorf("values.%s.hardLimit must be between %.0f and %.0f", metricKey, metricMin, metricMax)
+	}
+	if metric.Current < metricMin || metric.Current > metricMax {
+		return fmt.Errorf("values.%s.current must be between %.0f and %.0f", metricKey, metricMin, metricMax)
+	}
+	if metric.SoftLimit > metric.HardLimit {
+		return fmt.Errorf("values.%s.softLimit must be <= hardLimit", metricKey)
+	}
 	return nil
+}
+
+func isFinite(value float64) bool {
+	return !math.IsNaN(value) && !math.IsInf(value, 0)
+}
+
+func migrateLegacyValues(data []byte) (map[string]valueMetrics, bool) {
+	var legacy struct {
+		Limits *legacyValueLimits `json:"limits"`
+	}
+	if err := json.Unmarshal(data, &legacy); err != nil || legacy.Limits == nil {
+		return nil, false
+	}
+
+	soft := clampMetricValue(legacy.Limits.Soft)
+	hard := clampMetricValue(legacy.Limits.Hard)
+	if soft > hard {
+		soft = hard
+	}
+
+	return map[string]valueMetrics{
+		metricKey: {
+			Current:   soft,
+			SoftLimit: soft,
+			HardLimit: hard,
+		},
+	}, true
+}
+
+func clampMetricValue(value float64) float64 {
+	if !isFinite(value) {
+		return metricMin
+	}
+	if value < metricMin {
+		return metricMin
+	}
+	if value > metricMax {
+		return metricMax
+	}
+	return value
+}
+
+func normaliseValues(values map[string]valueMetrics) (map[string]valueMetrics, bool, error) {
+	if values == nil {
+		return nil, false, fmt.Errorf("values.%s is required", metricKey)
+	}
+
+	metric, ok := values[metricKey]
+	if !ok {
+		return nil, false, fmt.Errorf("values.%s is required", metricKey)
+	}
+
+	normalised := valueMetrics{
+		Current:   clampMetricValue(metric.Current),
+		SoftLimit: clampMetricValue(metric.SoftLimit),
+		HardLimit: clampMetricValue(metric.HardLimit),
+	}
+
+	if normalised.SoftLimit > normalised.HardLimit {
+		normalised.SoftLimit = normalised.HardLimit
+	}
+	if normalised.Current > normalised.HardLimit {
+		normalised.Current = normalised.HardLimit
+	}
+	if normalised.Current < metricMin {
+		normalised.Current = metricMin
+	}
+
+	changed := metric.Current != normalised.Current ||
+		metric.SoftLimit != normalised.SoftLimit ||
+		metric.HardLimit != normalised.HardLimit
+
+	if changed {
+		values[metricKey] = normalised
+	}
+
+	return values, changed, nil
+}
+
+func decodeValuePayload(data []byte, storageKey string) (valuePayload, bool, error) {
+	var payload valuePayload
+	if err := json.Unmarshal(data, &payload); err != nil {
+		return payload, false, err
+	}
+
+	updated := false
+	if len(payload.Values) == 0 {
+		if migrated, ok := migrateLegacyValues(data); ok {
+			payload.Values = migrated
+			updated = true
+		}
+	}
+
+	values, changed, err := normaliseValues(payload.Values)
+	if err != nil {
+		return payload, false, err
+	}
+	if changed {
+		updated = true
+	}
+	payload.Values = values
+
+	if strings.TrimSpace(payload.PeerID) == "" {
+		trimmed := strings.TrimPrefix(storageKey, "/peer/")
+		if trimmed == "" {
+			trimmed = storageKey
+		}
+		payload.PeerID = trimmed
+		updated = true
+	}
+
+	if err := validateValuePayload(payload); err != nil {
+		return payload, false, err
+	}
+
+	return payload, updated, nil
 }
 
 func isPreflight(h httpEvent.Event) bool {
@@ -155,7 +307,6 @@ func findValueByPeerID(db database.Database, peerID string) (string, []byte, err
 		return key, data, nil
 	}
 
-
 	return "", nil, errValueNotFound
 }
 
@@ -191,13 +342,19 @@ func listValues(e baseEvent.Event) uint32 {
 			return handleHTTPError(h, fmt.Errorf("failed to read value for key %s", id), 500)
 		}
 
-		var payload valuePayload
-		if err = json.Unmarshal(data, &payload); err != nil {
-			return handleHTTPError(h, fmt.Errorf("stored value for key %s is invalid", id), 500)
+		payload, updated, err := decodeValuePayload(data, id)
+		if err != nil {
+			return handleHTTPError(h, fmt.Errorf("stored value for key %s is invalid: %w", id, err), 500)
 		}
 
-		if strings.TrimSpace(payload.PeerID) == "" {
-			payload.PeerID = id
+		if updated {
+			payloadJSON, err := json.Marshal(payload)
+			if err != nil {
+				return handleHTTPError(h, fmt.Errorf("failed to encode value for key %s", id), 500)
+			}
+			if err = db.Put(id, payloadJSON); err != nil {
+				return handleHTTPError(h, fmt.Errorf("failed to update value for key %s", id), 500)
+			}
 		}
 
 		values = append(values, payload)
@@ -230,8 +387,24 @@ func registerValue(e baseEvent.Event) uint32 {
 		return handleHTTPError(h, fmt.Errorf("invalid payload format"), 400)
 	}
 
+	if len(payload.Values) == 0 {
+		if migrated, ok := migrateLegacyValues(body); ok {
+			payload.Values = migrated
+		}
+	}
+
 	if err = validateValuePayload(payload); err != nil {
 		return handleHTTPError(h, err, 400)
+	}
+
+	// Normalise persisted structure to a single metric entry.
+	values, _, err := normaliseValues(payload.Values)
+	if err != nil {
+		return handleHTTPError(h, err, 400)
+	}
+	metric := values[metricKey]
+	payload.Values = map[string]valueMetrics{
+		metricKey: metric,
 	}
 
 	db, err := openDB()
@@ -281,7 +454,7 @@ func getValue(e baseEvent.Event) uint32 {
 	}
 	defer db.Close()
 
-	_, data, err := findValueByPeerID(db, peerID)
+	key, data, err := findValueByPeerID(db, peerID)
 	if err != nil {
 		if errors.Is(err, errValueNotFound) {
 			return handleHTTPError(h, err, 404)
@@ -289,10 +462,22 @@ func getValue(e baseEvent.Event) uint32 {
 		return handleHTTPError(h, fmt.Errorf("failed to read value"), 500)
 	}
 
-	h.Headers().Set("Content-Type", "application/json")
-	h.Write(data)
-	h.Return(200)
-	return 0
+	payload, updated, err := decodeValuePayload(data, key)
+	if err != nil {
+		return handleHTTPError(h, fmt.Errorf("stored value is invalid: %w", err), 500)
+	}
+
+	if updated {
+		payloadJSON, err := json.Marshal(payload)
+		if err != nil {
+			return handleHTTPError(h, fmt.Errorf("failed to encode value"), 500)
+		}
+		if err = db.Put(key, payloadJSON); err != nil {
+			return handleHTTPError(h, fmt.Errorf("failed to update value"), 500)
+		}
+	}
+
+	return sendJSONResponse(h, payload)
 }
 
 //export deleteValue
