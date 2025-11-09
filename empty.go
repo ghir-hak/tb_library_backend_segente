@@ -12,7 +12,7 @@ import (
 	httpEvent "github.com/taubyte/go-sdk/http/event"
 )
 
-const dbName = "seguente"
+const dbName = "seguentedb"
 
 var errValueNotFound = errors.New("value not found")
 
