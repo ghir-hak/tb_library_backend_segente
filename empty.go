@@ -42,7 +42,7 @@ func sendJSONResponse(h httpEvent.Event, data interface{}) uint32 {
 	return 0
 }
 
-func openDB() (*database.Database, error) {
+func openDB() (database.Database, error) {
 	return database.New(dbName)
 }
 
@@ -52,6 +52,26 @@ func isPreflight(h httpEvent.Event) bool {
 		return true
 	}
 	return false
+}
+
+func getIDFromPath(h httpEvent.Event) (string, error) {
+	path, err := h.Path()
+	if err != nil {
+		return "", fmt.Errorf("failed to read path")
+	}
+
+	trimmed := strings.Trim(path, "/")
+	if trimmed == "" {
+		return "", fmt.Errorf("missing value id")
+	}
+
+	segments := strings.Split(trimmed, "/")
+	id := segments[len(segments)-1]
+	if id == "" {
+		return "", fmt.Errorf("missing value id")
+	}
+
+	return id, nil
 }
 
 // ---------- CRUD Handlers ----------
@@ -132,9 +152,9 @@ func getValue(e baseEvent.Event) uint32 {
 		return 0
 	}
 
-	id, err := h.Path().Get("id")
-	if err != nil || id == "" {
-		return handleHTTPError(h, fmt.Errorf("missing value id"), 400)
+	id, err := getIDFromPath(h)
+	if err != nil {
+		return handleHTTPError(h, err, 400)
 	}
 
 	db, err := openDB()
@@ -165,9 +185,9 @@ func deleteValue(e baseEvent.Event) uint32 {
 		return 0
 	}
 
-	id, err := h.Path().Get("id")
-	if err != nil || id == "" {
-		return handleHTTPError(h, fmt.Errorf("missing value id"), 400)
+	id, err := getIDFromPath(h)
+	if err != nil {
+		return handleHTTPError(h, err, 400)
 	}
 
 	db, err := openDB()
