@@ -13,7 +13,7 @@ import (
 )
 
 const (
-	dbName           = "seguente"
+	dbName           = "seguentedb"
 	valueStorePrefix = ""
 )
 
