@@ -14,7 +14,7 @@ import (
 )
 
 const (
-	dbName    = "seguentedb"
+	dbName    = "seguentedb2"
 	metricKey = "metric"
 	metricMin = 0.0
 	metricMax = 100.0
