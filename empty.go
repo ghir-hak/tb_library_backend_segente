@@ -171,9 +171,10 @@ func normaliseValues(values map[string]valueMetrics) (map[string]valueMetrics, b
 	if normalised.SoftLimit > normalised.HardLimit {
 		normalised.SoftLimit = normalised.HardLimit
 	}
-	if normalised.Current > normalised.HardLimit {
-		normalised.Current = normalised.HardLimit
-	}
+	// Remove or comment out these lines:
+	// if normalised.Current > normalised.HardLimit {
+	// 	normalised.Current = normalised.HardLimit
+	// }
 	if normalised.Current < metricMin {
 		normalised.Current = metricMin
 	}
